@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pong - Max's sound index!</title>
+<link rel="icon" href="favicon.png">
+<style>
+  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
+  a { color: #000; }
+  .row { margin: 8px 0; }
+  .small { font-size: 13px; }
+  canvas { display: block; border: 1px solid #000; width: 100%; max-width: 600px; height: auto; touch-action: none; cursor: none; }
+</style>
+</head>
+<body>
+<div class="row small"><a href="index.html">Max's sound index!</a> | <a href="weather.html">Weather playlist</a> | <a href="snake.html">Snake</a></div>
+<div class="row"><b>Pong</b> (you vs the computer, hard mode)</div>
+
+<canvas id="board" width="600" height="400" aria-label="Pong game board"></canvas>
+
+<p id="status" aria-live="polite">You're on the left. Move with the mouse, W and S, or the arrow keys. On a phone, drag on the board. First to 7 wins. Press Space or Start to play.</p>
+<div class="row"><button id="start">Start</button> <button id="pause">Pause</button></div>
+
+<script>
+const W = 600, H = 400, PW = 10, PH = 70, R = 6, WIN = 7;
+const PLAYER_X = 20, AI_X = W - 20 - PW;
+const PLAYER_SPEED = 8, AI_SPEED = 7.5;          // AI speed in px per frame
+const REACT = 0.35;                              // how early the AI reacts (0 = instantly)
+const BALL_START = 6, BALL_GAIN = 0.45, BALL_MAX = 15;
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+
+let player, ai, ball, scores, state = 'ready', keys = {}, mouseY = null, aiOffset = 0, serveDir = 1, serveAt = 0;
+let last = 0;
+
+function reset() {
+  player = { y: H / 2 - PH / 2 };
+  ai = { y: H / 2 - PH / 2 };
+  scores = [0, 0];
+  serveDir = Math.random() < 0.5 ? -1 : 1;
+  serve();
+}
+
+function serve() {
+  const angle = (Math.random() * 0.6 - 0.3);
+  ball = { x: W / 2, y: H / 2, vx: Math.cos(angle) * BALL_START * serveDir, vy: Math.sin(angle) * BALL_START, speed: BALL_START };
+  serveAt = performance.now() + 700;   // short pause before each serve
+  pickAiOffset();
+}
+
+// where the ball will be when it reaches x, including wall bounces
+function predictY(x) {
+  if ((ball.vx > 0 && x < ball.x) || (ball.vx < 0 && x > ball.x)) return H / 2;
+  const t = (x - ball.x) / ball.vx;
+  let y = ball.y + ball.vy * t;
+  const lo = R, span = H - 2 * R;
+  y -= lo;
+  y = ((y % (2 * span)) + 2 * span) % (2 * span);
+  if (y > span) y = 2 * span - y;
+  return y + lo;
+}
+
+// the AI aims to hit with the edge of its paddle for steep, hard returns,
+// with a small random error so it's beatable
+function pickAiOffset() {
+  const edge = (Math.random() < 0.5 ? -1 : 1) * PH * (0.2 + Math.random() * 0.2);
+  const error = (Math.random() - 0.5) * PH * 0.5;
+  aiOffset = edge + error;
+}
+
+function bounceOffPaddle(p, isPlayer) {
+  const rel = Math.max(-1, Math.min(1, (ball.y - (p.y + PH / 2)) / (PH / 2)));
+  const angle = rel * (Math.PI / 3);              // up to 60 degrees
+  ball.speed = Math.min(BALL_MAX, ball.speed + BALL_GAIN);
+  ball.vx = Math.cos(angle) * ball.speed * (isPlayer ? 1 : -1);
+  ball.vy = Math.sin(angle) * ball.speed;
+  if (!isPlayer) pickAiOffset();
+}
+
+function update(f) {   // f = frames elapsed (1 at 60fps)
+  // player
+  if (mouseY !== null) {
+    const target = mouseY - PH / 2, d = target - player.y;
+    player.y += Math.sign(d) * Math.min(Math.abs(d), PLAYER_SPEED * 2 * f);
+  }
+  if (keys.up) player.y -= PLAYER_SPEED * f;
+  if (keys.down) player.y += PLAYER_SPEED * f;
+  player.y = Math.max(0, Math.min(H - PH, player.y));
+
+  // computer
+  // it only starts tracking once the ball is past its reaction line, so fast, well-placed shots can beat it
+  const tracking = ball.vx > 0 && ball.x > W * REACT;
+  const target = (tracking ? predictY(AI_X) + aiOffset : H / 2) - PH / 2;
+  const d = target - ai.y;
+  ai.y += Math.sign(d) * Math.min(Math.abs(d), AI_SPEED * f);
+  ai.y = Math.max(0, Math.min(H - PH, ai.y));
+
+  if (performance.now() < serveAt) return;
+
+  // ball
+  const prevX = ball.x;
+  ball.x += ball.vx * f;
+  ball.y += ball.vy * f;
+  if (ball.y < R) { ball.y = 2 * R - ball.y; ball.vy = Math.abs(ball.vy); }
+  if (ball.y > H - R) { ball.y = 2 * (H - R) - ball.y; ball.vy = -Math.abs(ball.vy); }
+
+  // paddle hits, checked along the ball's path so fast balls can't pass through
+  const pFront = PLAYER_X + PW + R;
+  if (ball.vx < 0 && prevX >= pFront && ball.x < pFront) {
+    const yAt = ball.y - ball.vy * f * (ball.x - pFront) / (ball.x - prevX);
+    if (yAt > player.y - R && yAt < player.y + PH + R) { ball.x = pFront; ball.y = yAt; bounceOffPaddle(player, true); }
+  }
+  const aFront = AI_X - R;
+  if (ball.vx > 0 && prevX <= aFront && ball.x > aFront) {
+    const yAt = ball.y - ball.vy * f * (ball.x - aFront) / (ball.x - prevX);
+    if (yAt > ai.y - R && yAt < ai.y + PH + R) { ball.x = aFront; ball.y = yAt; bounceOffPaddle(ai, false); }
+  }
+
+  // points
+  if (ball.x < -R) point(1);
+  else if (ball.x > W + R) point(0);
+}
+
+function point(who) {
+  scores[who]++;
+  if (scores[who] >= WIN) {
+    state = 'over';
+    $('status').textContent = who === 0
+      ? `You win ${scores[0]} to ${scores[1]}! Hard mode beaten. Press Space or Start to play again.`
+      : `The computer wins ${scores[1]} to ${scores[0]}. Press Space or Start to try again.`;
+    return;
+  }
+  serveDir = who === 0 ? 1 : -1;   // serve towards whoever lost the point
+  serve();
+}
+
+function draw() {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#000';
+  for (let y = 5; y < H; y += 20) ctx.fillRect(W / 2 - 1, y, 2, 10);
+  ctx.font = '32px Arial'; ctx.textAlign = 'center';
+  ctx.fillText(scores[0], W / 2 - 50, 40);
+  ctx.fillText(scores[1], W / 2 + 50, 40);
+  ctx.font = '12px Arial';
+  ctx.fillText('You', W / 2 - 50, 58);
+  ctx.fillText('Computer', W / 2 + 50, 58);
+  ctx.fillRect(PLAYER_X, player.y, PW, PH);
+  ctx.fillRect(AI_X, ai.y, PW, PH);
+  if (state !== 'over') ctx.fillRect(ball.x - R, ball.y - R, R * 2, R * 2);
+}
+
+function loop(now) {
+  const f = Math.min(3, (now - last) / (1000 / 60));
+  last = now;
+  if (state === 'playing') update(f);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function start() {
+  reset(); state = 'playing';
+  $('pause').textContent = 'Pause';
+  $('status').textContent = 'Playing. Press Space to pause.';
+}
+function togglePause() {
+  if (state === 'playing') { state = 'paused'; $('pause').textContent = 'Resume'; $('status').textContent = 'Paused. Press Space to carry on.'; }
+  else if (state === 'paused') { state = 'playing'; $('pause').textContent = 'Pause'; $('status').textContent = 'Playing. Press Space to pause.'; }
+}
+
+const KEYS = { ArrowUp: 'up', w: 'up', W: 'up', ArrowDown: 'down', s: 'down', S: 'down' };
+document.addEventListener('keydown', e => {
+  if (KEYS[e.key]) { e.preventDefault(); keys[KEYS[e.key]] = true; mouseY = null; }
+  else if (e.key === ' ') { e.preventDefault(); (state === 'ready' || state === 'over') ? start() : togglePause(); }
+});
+document.addEventListener('keyup', e => { if (KEYS[e.key]) keys[KEYS[e.key]] = false; });
+
+// mouse and touch: paddle follows the pointer
+function pointerY(clientY) {
+  const r = canvas.getBoundingClientRect();
+  return (clientY - r.top) * (H / r.height);
+}
+canvas.addEventListener('mousemove', e => { mouseY = pointerY(e.clientY); });
+canvas.addEventListener('touchstart', e => {
+  mouseY = pointerY(e.touches[0].clientY);
+  if (state === 'ready' || state === 'over') start();
+}, { passive: true });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); mouseY = pointerY(e.touches[0].clientY); }, { passive: false });
+canvas.addEventListener('click', () => { if (state === 'ready' || state === 'over') start(); });
+
+$('start').addEventListener('click', start);
+$('pause').addEventListener('click', togglePause);
+
+reset();
+requestAnimationFrame(t => { last = t; loop(t); });
+</script>
+</body>
+</html>
