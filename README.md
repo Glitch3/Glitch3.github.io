@@ -24,9 +24,8 @@
 </div>
 
 <div id="settings">
-  <label><input type="radio" name="src" value="claude" checked> Claude</label>
-  <label><input type="radio" name="src" value="lastfm"> Last.fm</label>
-  <div><input id="key" type="password" placeholder="Last.fm API key" aria-label="Last.fm API key"></div>
+  <label><input type="radio" name="src" value="lastfm" checked> Last.fm</label>
+  <label><input type="radio" name="src" value="claude"> Claude</label>
   <label><input type="radio" name="src" value="sample"> Sample data (works offline)</label>
   <p>Claude only works inside the Claude preview. Last.fm is blocked in the preview but works once you host this file. Sample data covers about 25 indie folk artists, starting from Big Thief.</p>
 </div>
@@ -38,7 +37,11 @@
 const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
 const cache = new Map();
-let source = 'claude';
+// Paste your Last.fm API key here (from https://www.last.fm/api/account/create).
+// Only the API key goes here, never the "shared secret".
+const LASTFM_API_KEY = '490d2260c0a13cc21edc04650c9e5235';
+
+let source = 'lastfm';
 
 /* ---------- data sources ---------- */
 
@@ -64,8 +67,8 @@ Rules: "similar" has 26 real artists, sorted by score; score is 0.3-1.0 for how 
 }
 
 async function fromLastfm(artist) {
-  const key = document.getElementById('key').value.trim();
-  if (!key) throw new Error("Add a Last.fm API key in Data source, or switch to Claude.");
+  const key = LASTFM_API_KEY;
+  if (!key || key === 'PASTE_YOUR_KEY_HERE') throw new Error("No Last.fm API key set. Add it to LASTFM_API_KEY in the page's code.");
   const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&autocorrect=1&limit=30&format=json`
     + `&artist=${encodeURIComponent(artist)}&api_key=${encodeURIComponent(key)}`;
   const data = await (await fetch(url)).json();
