@@ -1,4 +1,3 @@
-# Glitch3.github.io
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -92,7 +91,8 @@
   <label><input type="radio" name="src" value="claude" checked> Claude</label>
   <label><input type="radio" name="src" value="lastfm"> Last.fm</label>
   <div id="keyRow"><input id="key" type="password" placeholder="Last.fm API key" aria-label="Last.fm API key"></div>
-  <p>Claude works inside this preview. Last.fm gives real listening-based similarity but may be blocked here; it works once you host this file yourself.</p>
+  <label><input type="radio" name="src" value="sample"> Sample data (works offline)</label>
+  <p>Claude only works inside the Claude preview. Last.fm is blocked in the preview but works once you host this file. Sample data covers about 25 indie folk artists, starting from Big Thief.</p>
 </div>
 
 <div id="map">
@@ -128,6 +128,7 @@ Rules: "similar" has 26 real artists, sorted by score; score is 0.3-1.0 for how 
       messages: [{ role: "user", content: prompt }]
     })
   });
+  if (!res.ok) throw new Error(`Claude returned an error (${res.status}). Try again, or switch to Sample data.`);
   const data = await res.json();
   const text = (data.content || []).map(c => c.text || "").join("");
   const json = JSON.parse(text.replace(/```json|```/g, "").trim());
@@ -151,10 +152,37 @@ async function fromLastfm(artist) {
   };
 }
 
+// Offline sample: each artist has a position in a made-up "taste space".
+// Similarity = closeness in that space, so every name on the map is clickable.
+const SAMPLE = {
+  "Big Thief": [0, 0], "Adrianne Lenker": [-0.6, 0.4], "Buck Meek": [-0.3, 1.1],
+  "Phoebe Bridgers": [1.2, -0.5], "boygenius": [1.5, -0.2], "Julien Baker": [1.9, 0.3],
+  "Lucy Dacus": [1.8, -0.9], "Waxahatchee": [0.9, 1.2], "Hand Habits": [-0.2, 1.6],
+  "Angel Olsen": [1.0, 0.6], "Sharon Van Etten": [1.6, 1.0], "Weyes Blood": [-1.4, -0.6],
+  "Bon Iver": [-1.3, 1.3], "Sufjan Stevens": [-2.0, 0.6], "Fleet Foxes": [-1.9, 1.7],
+  "Andy Shauf": [-1.0, 2.1], "Snail Mail": [2.4, -1.4], "Soccer Mommy": [2.6, -0.7],
+  "Japanese Breakfast": [2.0, -2.0], "Mitski": [1.4, -1.6], "Florist": [-0.4, -1.4],
+  "Grouper": [-1.5, -1.7], "Cassandra Jenkins": [-0.9, -0.9], "Alex G": [0.5, -1.9]
+};
+function fromSample(artist) {
+  const name = Object.keys(SAMPLE).find(n => n.toLowerCase() === artist.toLowerCase());
+  if (!name) throw new Error(`Sample data only includes ${Object.keys(SAMPLE).slice(0, 4).join(', ')} and a few others. Try Big Thief.`);
+  const dist = (a, b) => Math.hypot(SAMPLE[a][0] - SAMPLE[b][0], SAMPLE[a][1] - SAMPLE[b][1]);
+  const similar = Object.keys(SAMPLE).filter(n => n !== name)
+    .map(n => ({ name: n, score: 1 / (1 + dist(name, n)) }))
+    .sort((a, b) => b.score - a.score);
+  const links = [];
+  similar.forEach((a, i) => similar.forEach((b, j) => {
+    if (i < j && dist(a.name, b.name) < 0.9) links.push([i, j]);
+  }));
+  return { artist: name, similar, links };
+}
+
 async function getSimilar(artist) {
   const k = source + ':' + artist.toLowerCase();
   if (cache.has(k)) return cache.get(k);
-  const result = await (source === 'lastfm' ? fromLastfm(artist) : fromClaude(artist));
+  const result = await (source === 'lastfm' ? fromLastfm(artist)
+    : source === 'sample' ? fromSample(artist) : fromClaude(artist));
   cache.set(k, result);
   return result;
 }
@@ -283,8 +311,10 @@ async function load(artist) {
     statusEl.className = 'error';
     statusEl.textContent = err instanceof SyntaxError
       ? "The response couldn't be read. Try again."
-      : (err.message === 'Failed to fetch'
-          ? "Couldn't reach the data source. Last.fm may be blocked in this preview; switch to Claude."
+      : (/fetch|network|load failed/i.test(err.message)
+          ? (source === 'lastfm'
+              ? "Couldn't reach Last.fm. It's blocked in this preview; it works once you host the file. Switch to Claude or Sample data."
+              : "Couldn't reach Claude. This only works inside the Claude preview, not in a downloaded copy. Switch to Sample data, or use Last.fm once hosted.")
           : err.message);
   }
 }
