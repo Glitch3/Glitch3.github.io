@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Max's Music Index!</title>
+<title>Max's sound index!</title>
 <style>
   body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
   a { color: #000; }
@@ -15,8 +15,9 @@
 </style>
 </head>
 <body>
+<div class="row small"><a href="weather.html">Weather playlist</a> | <a href="snake.html">Snake</a></div>
 <div class="row">
-  <b>Max's Music Index!</b>
+  <b>Max's sound index!</b>
   <form id="search" style="display:inline">
     <input id="q" type="text" placeholder="Type an artist" autocomplete="off" aria-label="Artist name">
     <button type="submit">Search</button>
@@ -137,7 +138,7 @@ async function loadArtist(artist) {
   if (t !== ticket) return;
   view = { title: `Artists similar to ${sim.artist}`, items };
   mode = 'similar';
-  document.title = `${sim.artist} on Sound map`;
+  document.title = `${sim.artist} - Max's sound index!`;
   render();
 }
 
@@ -169,7 +170,7 @@ async function loadPlaylist(artist, len) {
   if (t !== ticket) return;
   playlist = { seed: { name: sim.artist }, items, len, tracksBy: new Map(), list: [] };
   mode = 'playlist';
-  document.title = `Playlist from ${sim.artist} on Sound map`;
+  document.title = `Playlist from ${sim.artist} - Max's sound index!`;
   await buildPlaylist(t);
 }
 
