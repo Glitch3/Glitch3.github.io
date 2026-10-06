@@ -1,194 +1,407 @@
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Max's sound index!</title>
 <style>
-  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; }
+  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
   a { color: #000; }
-  #settings { display: none; border: 1px solid #000; padding: 10px; margin: 10px 0; max-width: 400px; font-size: 14px; }
-  #settings.open { display: block; }
-  #settings label { display: block; margin: 4px 0; }
-  li { margin: 4px 0; }
+  .row { margin: 8px 0; }
+  ol.results > li { margin: 0 0 16px; }
+  .meta, .small { font-size: 13px; }
+  .tracks { margin: 6px 0; font-size: 14px; }
+  button.link { background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; cursor: pointer; color: #000; }
 </style>
 </head>
 <body>
-<div>
+<div class="row">
   <b>Sound map</b>
   <form id="search" style="display:inline">
     <input id="q" type="text" placeholder="Type an artist" autocomplete="off" aria-label="Artist name">
     <button type="submit">Search</button>
   </form>
-  <button id="settingsBtn" aria-expanded="false">Data source</button>
 </div>
-
-<div id="settings">
-  <label><input type="radio" name="src" value="lastfm" checked> Last.fm</label>
-  <label><input type="radio" name="src" value="claude"> Claude</label>
-  <label><input type="radio" name="src" value="sample"> Sample data (works offline)</label>
-  <p>Claude only works inside the Claude preview. Last.fm is blocked in the preview but works once you host this file. Sample data covers about 25 indie folk artists, starting from Big Thief.</p>
+<div class="row">
+  <b>Playlist</b>
+  <form id="plForm" style="display:inline">
+    <input id="plq" type="text" placeholder="Start from an artist" autocomplete="off" aria-label="Playlist starting artist">
+    <select id="plLen" aria-label="Number of tracks">
+      <option value="20">20 tracks</option>
+      <option value="40">40 tracks</option>
+      <option value="60">60 tracks</option>
+    </select>
+    <button type="submit">Make playlist</button>
+  </form>
+</div>
+<div class="row">
+  <label>Popularity:
+    <select id="pop">
+      <option value="Infinity">Any</option>
+      <option value="1000000">Under 1,000,000 listeners</option>
+      <option value="250000">Under 250,000 listeners</option>
+      <option value="50000">Under 50,000 listeners</option>
+      <option value="10000">Under 10,000 listeners</option>
+    </select>
+  </label>
 </div>
 
 <p id="status" aria-live="polite"></p>
-<div id="results"><p>Type an artist to see a list of similar artists, most similar first. Click any name to see artists similar to them.</p></div>
+<div id="results">
+  <p>Search for an artist to see similar artists, or make a playlist from an artist and the artists similar to them.
+  Use Popularity to find smaller artists. Click an artist's name to see their top tracks.</p>
+</div>
 
 <script>
-const statusEl = document.getElementById('status');
-const resultsEl = document.getElementById('results');
-const cache = new Map();
-// Paste your Last.fm API key here (from https://www.last.fm/api/account/create).
-// Only the API key goes here, never the "shared secret".
+// Last.fm API key. Only the API key goes here, never the "shared secret".
 const LASTFM_API_KEY = '490d2260c0a13cc21edc04650c9e5235';
 
-let source = 'lastfm';
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const $ = id => document.getElementById(id);
+const cache = new Map();
+let view = null;      // { title, items: [{ name, score, info }] }
+let playlist = null;  // { seed, items, len, tracksBy, list: [{ artist, track }] }
+let mode = 'similar';
+let ticket = 0;
 
-/* ---------- data sources ---------- */
+/* ---------- Last.fm ---------- */
 
-async function fromClaude(artist) {
-  const prompt = `You are a music similarity engine. For the artist "${artist}", return ONLY a JSON object, no prose and no code fences:
-{"artist":"<correctly spelled name>","similar":[{"name":"...","score":0.0}]}
-Rules: "similar" has 26 real artists, sorted by score; score is 0.3-1.0 for how alike they sound and appeal to the same listeners. If the artist is unknown, return {"artist":null}.`;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      messages: [{ role: "user", content: prompt }]
-    })
+async function lfm(params) {
+  const qs = new URLSearchParams({ ...params, api_key: LASTFM_API_KEY, format: 'json' });
+  const url = 'https://ws.audioscrobbler.com/2.0/?' + qs;
+  if (cache.has(url)) return cache.get(url);
+  const p = fetch(url).then(r => r.json()).then(d => {
+    if (d.error) throw new Error(d.message || 'Last.fm returned an error.');
+    return d;
   });
-  if (!res.ok) throw new Error(`Claude returned an error (${res.status}). Try again, or switch to Sample data.`);
-  const data = await res.json();
-  const text = (data.content || []).map(c => c.text || "").join("");
-  const json = JSON.parse(text.replace(/```json|```/g, "").trim());
-  if (!json.artist) throw new Error(`No artist called "${artist}" found. Check the spelling.`);
-  return json;
+  cache.set(url, p);
+  p.catch(() => cache.delete(url));
+  return p;
 }
 
-async function fromLastfm(artist) {
-  const key = LASTFM_API_KEY;
-  if (!key || key === 'PASTE_YOUR_KEY_HERE') throw new Error("No Last.fm API key set. Add it to LASTFM_API_KEY in the page's code.");
-  const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&autocorrect=1&limit=30&format=json`
-    + `&artist=${encodeURIComponent(artist)}&api_key=${encodeURIComponent(key)}`;
-  const data = await (await fetch(url)).json();
-  if (data.error) throw new Error(data.message || "Last.fm returned an error.");
-  const list = data.similarartists.artist;
-  if (!list.length) throw new Error(`Last.fm has no similar artists for "${artist}".`);
+async function getSimilar(artist, limit = 60) {
+  const d = await lfm({ method: 'artist.getsimilar', artist, autocorrect: 1, limit });
   return {
-    artist: data.similarartists["@attr"].artist,
-    similar: list.map(a => ({ name: a.name, score: +a.match })),
+    artist: d.similarartists['@attr'].artist,
+    list: d.similarartists.artist.map(a => ({ name: a.name, score: +a.match }))
   };
 }
 
-// Offline sample: each artist has a position in a made-up "taste space".
-// Similarity = closeness in that space, so every name in the list is clickable.
-const SAMPLE = {
-  "Big Thief": [0, 0], "Adrianne Lenker": [-0.6, 0.4], "Buck Meek": [-0.3, 1.1],
-  "Phoebe Bridgers": [1.2, -0.5], "boygenius": [1.5, -0.2], "Julien Baker": [1.9, 0.3],
-  "Lucy Dacus": [1.8, -0.9], "Waxahatchee": [0.9, 1.2], "Hand Habits": [-0.2, 1.6],
-  "Angel Olsen": [1.0, 0.6], "Sharon Van Etten": [1.6, 1.0], "Weyes Blood": [-1.4, -0.6],
-  "Bon Iver": [-1.3, 1.3], "Sufjan Stevens": [-2.0, 0.6], "Fleet Foxes": [-1.9, 1.7],
-  "Andy Shauf": [-1.0, 2.1], "Snail Mail": [2.4, -1.4], "Soccer Mommy": [2.6, -0.7],
-  "Japanese Breakfast": [2.0, -2.0], "Mitski": [1.4, -1.6], "Florist": [-0.4, -1.4],
-  "Grouper": [-1.5, -1.7], "Cassandra Jenkins": [-0.9, -0.9], "Alex G": [0.5, -1.9]
-};
-function fromSample(artist) {
-  const name = Object.keys(SAMPLE).find(n => n.toLowerCase() === artist.toLowerCase());
-  if (!name) throw new Error(`Sample data only includes ${Object.keys(SAMPLE).slice(0, 4).join(', ')} and a few others. Try Big Thief.`);
-  const dist = (a, b) => Math.hypot(SAMPLE[a][0] - SAMPLE[b][0], SAMPLE[a][1] - SAMPLE[b][1]);
-  const similar = Object.keys(SAMPLE).filter(n => n !== name)
-    .map(n => ({ name: n, score: 1 / (1 + dist(name, n)) }))
-    .sort((a, b) => b.score - a.score);
-  return { artist: name, similar };
+async function getInfo(name) {
+  try {
+    const d = await lfm({ method: 'artist.getinfo', artist: name, autocorrect: 1 });
+    const a = d.artist;
+    return {
+      listeners: +a.stats.listeners,
+      tags: ((a.tags && a.tags.tag) || []).slice(0, 4).map(t => t.name),
+      url: a.url
+    };
+  } catch { return { listeners: NaN, tags: [], url: null }; }
 }
 
-async function getSimilar(artist) {
-  const k = source + ':' + artist.toLowerCase();
-  if (cache.has(k)) return cache.get(k);
-  const result = await (source === 'lastfm' ? fromLastfm(artist)
-    : source === 'sample' ? fromSample(artist) : fromClaude(artist));
-  cache.set(k, result);
-  return result;
+async function getTopTracks(name) {
+  const d = await lfm({ method: 'artist.gettoptracks', artist: name, autocorrect: 1, limit: 10 });
+  return d.toptracks.track.map(t => ({ name: t.name, listeners: +t.listeners }));
+}
+
+// run fn over items, a few at a time, to stay inside Last.fm's rate limits
+async function mapLimit(items, n, fn, onProgress) {
+  const out = new Array(items.length); let i = 0, done = 0;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (i < items.length) {
+      const k = i++;
+      out[k] = await fn(items[k]);
+      onProgress && onProgress(++done, items.length);
+    }
+  }));
+  return out;
+}
+
+/* ---------- loading ---------- */
+
+async function addInfo(items, t) {
+  const infos = await mapLimit(items, 5, x => getInfo(x.name), (d, n) => {
+    if (t === ticket) statusEl.textContent = `Loading artist details ${d} of ${n}…`;
+  });
+  items.forEach((x, k) => x.info = infos[k]);
+  return items;
+}
+
+async function loadArtist(artist) {
+  const t = ++ticket;
+  statusEl.textContent = `Loading artists similar to ${artist}…`;
+  const sim = await getSimilar(artist);
+  if (!sim.list.length) throw new Error(`Last.fm has no similar artists for "${artist}".`);
+  const items = await addInfo(sim.list, t);
+  if (t !== ticket) return;
+  view = { title: `Artists similar to ${sim.artist}`, items };
+  mode = 'similar';
+  document.title = `${sim.artist} on Sound map`;
+  render();
+}
+
+/* ---------- playlist ---------- */
+
+// random sample of k items, favouring higher scores
+function weightedSample(items, k) {
+  return items
+    .map(x => ({ x, key: Math.pow(Math.random(), 1 / (x.score + 0.05)) }))
+    .sort((a, b) => b.key - a.key)
+    .slice(0, k)
+    .map(o => o.x);
+}
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function loadPlaylist(artist, len) {
+  const t = ++ticket;
+  statusEl.textContent = `Finding artists for a playlist from ${artist}…`;
+  const sim = await getSimilar(artist);
+  if (!sim.list.length) throw new Error(`Last.fm has no similar artists for "${artist}".`);
+  const items = await addInfo(sim.list, t);
+  if (t !== ticket) return;
+  playlist = { seed: { name: sim.artist }, items, len, tracksBy: new Map(), list: [] };
+  mode = 'playlist';
+  document.title = `Playlist from ${sim.artist} on Sound map`;
+  await buildPlaylist(t);
+}
+
+async function buildPlaylist(t) {
+  const p = playlist;
+  const cap = +$('pop').value;
+  const pool = p.items.filter(x => !(x.info.listeners >= cap));
+  // the starting artist, plus up to one similar artist per track
+  const picked = [p.seed, ...weightedSample(pool, p.len - 1)];
+
+  const need = picked.filter(a => !p.tracksBy.has(a.name));
+  await mapLimit(need, 5, async a => {
+    p.tracksBy.set(a.name, await getTopTracks(a.name).catch(() => []));
+  }, (d, n) => { if (t === ticket) statusEl.textContent = `Loading top tracks ${d} of ${n}…`; });
+  if (t !== ticket) return;
+
+  // each artist's tracks in a loose random order that still favours their best-known songs
+  const avail = new Map();
+  picked.forEach(a => {
+    const tracks = p.tracksBy.get(a.name) || [];
+    if (tracks.length) avail.set(a.name, tracks
+      .map((tr, i) => ({ tr, k: i + Math.random() * 4 }))
+      .sort((x, y) => x.k - y.k).map(o => o.tr));
+  });
+  if (!avail.size) throw new Error('No tracks found for these artists. Try another artist.');
+
+  // go round the artists one track at a time so no artist plays twice in a row
+  const list = []; let last = null;
+  while (list.length < p.len) {
+    const round = shuffle([...avail.keys()].filter(n => avail.get(n).length));
+    if (!round.length) break;
+    if (round.length > 1 && round[0] === last) [round[0], round[1]] = [round[1], round[0]];
+    for (const name of round) {
+      if (list.length >= p.len) break;
+      list.push({ artist: name, track: avail.get(name).shift().name });
+      last = name;
+    }
+  }
+  p.list = list;
+  renderPlaylist();
+  statusEl.textContent = list.length < p.len
+    ? `Only found ${list.length} tracks with these filters. Choose a higher popularity limit for more.` : '';
+}
+
+function renderPlaylist() {
+  const p = playlist;
+  resultsEl.innerHTML = '';
+  const h = document.createElement('h2');
+  h.textContent = `Playlist from ${p.seed.name}`;
+
+  const bar = document.createElement('div');
+  bar.className = 'row';
+  const shuf = document.createElement('button');
+  shuf.textContent = 'Shuffle';
+  shuf.addEventListener('click', () => buildPlaylist(++ticket).catch(showError));
+  const copy = document.createElement('button');
+  copy.textContent = 'Copy as text';
+  copy.addEventListener('click', copyPlaylist);
+  bar.append(`${p.list.length} tracks `, shuf, ' ', copy);
+
+  const help = document.createElement('p');
+  help.className = 'small';
+  help.innerHTML = 'To make this a Spotify, Apple Music or YouTube playlist, copy it and paste it into '
+    + '<a href="https://www.tunemymusic.com" target="_blank" rel="noopener">TuneMyMusic</a> or '
+    + '<a href="https://soundiiz.com" target="_blank" rel="noopener">Soundiiz</a>.';
+
+  const ol = document.createElement('ol');
+  p.list.forEach((x, i) => {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = ytLink(x.artist, x.track); a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = `${x.artist} - ${x.track}`;
+    const rm = document.createElement('button');
+    rm.className = 'link small';
+    rm.textContent = 'Remove';
+    rm.setAttribute('aria-label', `Remove ${x.track}`);
+    rm.addEventListener('click', () => { p.list.splice(i, 1); renderPlaylist(); });
+    li.append(a, ' ', rm);
+    ol.append(li);
+  });
+  resultsEl.append(h, bar, help, ol);
+}
+
+async function copyPlaylist() {
+  const text = playlist.list.map(x => `${x.artist} - ${x.track}`).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    statusEl.textContent = `Copied ${playlist.list.length} tracks.`;
+  } catch {
+    // clipboard blocked: show the text so it can be copied by hand
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.rows = 10; ta.style.width = '100%';
+    resultsEl.append(ta);
+    ta.select();
+    statusEl.textContent = 'Select the text below and copy it.';
+  }
 }
 
 /* ---------- rendering ---------- */
 
-function draw(data) {
+const fmt = n => isNaN(n) ? 'unknown' : n.toLocaleString();
+const ytLink = (artist, track) =>
+  'https://www.youtube.com/results?search_query=' + encodeURIComponent(artist + ' ' + track);
+const artistHash = name => '#/' + encodeURIComponent(name).replace(/%20/g, '+');
+
+function render() {
+  if (!view) return;
+  const cap = +$('pop').value;
+  const shown = view.items.filter(x => !(x.info.listeners >= cap));
+
   resultsEl.innerHTML = '';
   const h = document.createElement('h2');
-  h.textContent = `Artists similar to ${data.artist}`;
+  h.textContent = view.title;
+  resultsEl.append(h);
+
+  const hidden = view.items.length - shown.length;
+  statusEl.textContent = hidden ? `${shown.length} shown, ${hidden} hidden by your filters.` : '';
+
+  if (!shown.length) {
+    const p = document.createElement('p');
+    p.textContent = 'No artists match these filters. Choose a higher popularity limit.';
+    resultsEl.append(p);
+    return;
+  }
+
   const ol = document.createElement('ol');
-  data.similar
-    .filter(d => d.name.toLowerCase() !== data.artist.toLowerCase())
-    .sort((a, b) => b.score - a.score)
-    .forEach(d => {
+  ol.className = 'results';
+  shown.forEach(x => {
+    const li = document.createElement('li');
+
+    const name = document.createElement('button');
+    name.className = 'link';
+    name.innerHTML = '<b></b>';
+    name.firstChild.textContent = x.name;
+    name.setAttribute('aria-expanded', 'false');
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const bits = [];
+    bits.push(Math.round(x.score * 100) + '% match');
+    bits.push(fmt(x.info.listeners) + ' listeners');
+    if (x.info.tags.length) bits.push(x.info.tags.join(', '));
+    meta.textContent = bits.join('. ') + '.';
+
+    const links = document.createElement('div');
+    links.className = 'small';
+    const sim = document.createElement('a');
+    sim.href = artistHash(x.name); sim.textContent = 'Similar artists';
+    links.append(sim);
+    if (x.info.url) {
+      const lf = document.createElement('a');
+      lf.href = x.info.url; lf.target = '_blank'; lf.rel = 'noopener'; lf.textContent = 'Last.fm page';
+      links.append(' | ', lf);
+    }
+
+    const tracks = document.createElement('div');
+    tracks.className = 'tracks';
+    tracks.hidden = true;
+
+    name.addEventListener('click', () => toggleTracks(x.name, name, tracks));
+    li.append(name, meta, tracks, links);
+    ol.append(li);
+  });
+  resultsEl.append(ol);
+}
+
+async function toggleTracks(artist, btn, box) {
+  const open = box.hidden;
+  box.hidden = !open;
+  btn.setAttribute('aria-expanded', open);
+  if (!open || box.dataset.loaded) return;
+  box.textContent = 'Loading top tracks…';
+  try {
+    const list = await getTopTracks(artist);
+    box.innerHTML = '<b>Top tracks</b>';
+    const ol = document.createElement('ol');
+    list.forEach(t => {
       const li = document.createElement('li');
       const a = document.createElement('a');
-      a.href = '#/' + encodeURIComponent(d.name).replace(/%20/g, '+');
-      a.textContent = d.name;
-      li.append(a, ` (${Math.round(d.score * 100)}% match)`);
+      a.href = ytLink(artist, t.name); a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = t.name;
+      li.append(a, ` (${fmt(t.listeners)} listeners)`);
       ol.append(li);
     });
-  resultsEl.append(h, ol);
-  window.scrollTo(0, 0);
+    box.append(ol);
+    box.dataset.loaded = '1';
+  } catch (e) {
+    box.textContent = "Couldn't load top tracks. Click the name again to retry.";
+    box.hidden = true; btn.setAttribute('aria-expanded', 'false');
+  }
 }
 
 /* ---------- navigation ---------- */
 
-let loading = 0;
-async function load(artist) {
-  const ticket = ++loading;
-  statusEl.className = '';
-  statusEl.textContent = `Loading ${artist}…`;
-  try {
-    const data = await getSimilar(artist);
-    if (ticket !== loading) return;
-    draw(data);
-    document.title = `${data.artist} on Sound map`;
-    statusEl.textContent = '';
-  } catch (err) {
-    if (ticket !== loading) return;
-    statusEl.className = 'error';
-    statusEl.textContent = err instanceof SyntaxError
-      ? "The response couldn't be read. Try again."
-      : (/fetch|network|load failed/i.test(err.message)
-          ? (source === 'lastfm'
-              ? "Couldn't reach Last.fm. It's blocked in this preview; it works once you host the file. Switch to Claude or Sample data."
-              : "Couldn't reach Claude. This only works inside the Claude preview, not in a downloaded copy. Switch to Sample data, or use Last.fm once hosted.")
-          : err.message);
-  }
+function showError(err) {
+  statusEl.textContent = /fetch|network|load failed/i.test(err.message)
+    ? "Couldn't reach Last.fm. Check your connection. Last.fm is blocked inside the Claude preview, so open the hosted page instead."
+    : err.message;
 }
 
-function go(artist) {
-  const h = '#/' + encodeURIComponent(artist).replace(/%20/g, '+');
-  if (location.hash === h) load(artist); else location.hash = h;
-}
-
-function fromHash() {
-  const m = location.hash.match(/^#\/(.+)/);
-  if (m) {
+function route() {
+  let m;
+  if ((m = location.hash.match(/^#playlist\/(\d+)\/(.+)/))) {
+    const name = decodeURIComponent(m[2].replace(/\+/g, ' '));
+    $('plq').value = name;
+    $('plLen').value = m[1];
+    loadPlaylist(name, Math.min(+m[1], 100)).catch(showError);
+  } else if ((m = location.hash.match(/^#\/(.+)/))) {
     const name = decodeURIComponent(m[1].replace(/\+/g, ' '));
-    document.getElementById('q').value = name;
-    load(name);
+    $('q').value = name;
+    loadArtist(name).catch(showError);
   }
 }
-window.addEventListener('hashchange', fromHash);
+function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
 
-document.getElementById('search').addEventListener('submit', e => {
+window.addEventListener('hashchange', route);
+$('search').addEventListener('submit', e => {
   e.preventDefault();
-  const v = document.getElementById('q').value.trim();
-  if (v) go(v);
+  const v = $('q').value.trim();
+  if (v) go(artistHash(v));
+});
+$('plForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('plq').value.trim();
+  if (v) go('#playlist/' + $('plLen').value + '/' + encodeURIComponent(v).replace(/%20/g, '+'));
+});
+$('pop').addEventListener('change', () => {
+  if (mode === 'playlist' && playlist) buildPlaylist(++ticket).catch(showError);
+  else render();
 });
 
-const settings = document.getElementById('settings'), sBtn = document.getElementById('settingsBtn');
-sBtn.addEventListener('click', () => {
-  const open = settings.classList.toggle('open');
-  sBtn.setAttribute('aria-expanded', open);
-});
-document.querySelectorAll('input[name=src]').forEach(r =>
-  r.addEventListener('change', () => { source = r.value; }));
-
-fromHash();
+route();
 </script>
 </body>
 </html>
