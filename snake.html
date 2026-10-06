@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake - Max's sound index!</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
+  a { color: #000; }
+  .row { margin: 8px 0; }
+  .small { font-size: 13px; }
+  canvas { display: block; border: 1px solid #000; width: 100%; max-width: 400px; height: auto;
+           image-rendering: pixelated; touch-action: none; }
+  #pad { max-width: 400px; text-align: center; }
+  #pad button { width: 70px; height: 40px; margin: 2px; font: inherit; }
+</style>
+</head>
+<body>
+<div class="row small"><a href="index.html">Max's sound index!</a> | <a href="weather.html">Weather playlist</a></div>
+<div class="row"><b>Snake</b></div>
+<div class="row">Score: <span id="score">0</span> | Best: <span id="best">0</span></div>
+
+<canvas id="board" width="400" height="400" aria-label="Snake game board"></canvas>
+
+<p id="status" aria-live="polite">Press Space or Start to play. Use the arrow keys or WASD to steer.</p>
+<div class="row"><button id="start">Start</button> <button id="pause">Pause</button></div>
+
+<div id="pad" aria-label="Direction buttons">
+  <div><button data-dir="up">Up</button></div>
+  <div><button data-dir="left">Left</button><button data-dir="down">Down</button><button data-dir="right">Right</button></div>
+</div>
+
+<script>
+const N = 20, CELL = 20, STEP_MS = 120;
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+let snake, dir, queue, food, score, best = 0, timer = null, over = true, paused = false;
+
+function reset() {
+  snake = [[9, 10], [8, 10], [7, 10]];
+  dir = 'right'; queue = [];
+  score = 0; $('score').textContent = 0;
+  placeFood();
+}
+
+function placeFood() {
+  const taken = new Set(snake.map(([x, y]) => x + ',' + y));
+  const free = [];
+  for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) if (!taken.has(x + ',' + y)) free.push([x, y]);
+  food = free[Math.floor(Math.random() * free.length)];
+}
+
+function turn(d) {
+  if (over || paused) return;
+  // compare against the last queued direction so quick double-taps can't reverse into yourself
+  const last = queue.length ? queue[queue.length - 1] : dir;
+  const [lx, ly] = DIRS[last], [nx, ny] = DIRS[d];
+  if (lx + nx === 0 && ly + ny === 0) return;
+  if (d !== last && queue.length < 3) queue.push(d);
+}
+
+function step() {
+  if (queue.length) dir = queue.shift();
+  const [dx, dy] = DIRS[dir];
+  const head = [snake[0][0] + dx, snake[0][1] + dy];
+  const eating = head[0] === food[0] && head[1] === food[1];
+  const body = eating ? snake : snake.slice(0, -1);   // the tail moves away unless we grow
+  const hitWall = head[0] < 0 || head[1] < 0 || head[0] >= N || head[1] >= N;
+  const hitSelf = body.some(([x, y]) => x === head[0] && y === head[1]);
+  if (hitWall || hitSelf) return end();
+  snake = [head, ...body];
+  if (eating) {
+    score++; $('score').textContent = score;
+    if (snake.length === N * N) return end(true);
+    placeFood();
+  }
+  draw();
+}
+
+function draw() {
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000';
+  snake.forEach(([x, y]) => ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2));
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+  ctx.strokeRect(food[0] * CELL + 4, food[1] * CELL + 4, CELL - 8, CELL - 8);
+}
+
+function start() {
+  reset(); over = false; paused = false;
+  $('status').textContent = 'Playing. Press Space to pause.';
+  $('pause').textContent = 'Pause';
+  clearInterval(timer); timer = setInterval(step, STEP_MS);
+  draw();
+}
+
+function end(won) {
+  clearInterval(timer); over = true;
+  if (score > best) { best = score; $('best').textContent = best; }
+  $('status').textContent = (won ? 'You filled the board! ' : 'Game over. ')
+    + `You scored ${score}. Press Space or Start to play again.`;
+  draw();
+}
+
+function togglePause() {
+  if (over) return;
+  paused = !paused;
+  if (paused) { clearInterval(timer); $('status').textContent = 'Paused. Press Space to carry on.'; $('pause').textContent = 'Resume'; }
+  else { timer = setInterval(step, STEP_MS); $('status').textContent = 'Playing. Press Space to pause.'; $('pause').textContent = 'Pause'; }
+}
+
+const KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+               w: 'up', s: 'down', a: 'left', d: 'right', W: 'up', S: 'down', A: 'left', D: 'right' };
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (KEYS[e.key]) { e.preventDefault(); turn(KEYS[e.key]); }
+  else if (e.key === ' ') { e.preventDefault(); over ? start() : togglePause(); }
+});
+
+$('start').addEventListener('click', start);
+$('pause').addEventListener('click', togglePause);
+document.querySelectorAll('#pad button').forEach(b =>
+  b.addEventListener('click', () => turn(b.dataset.dir)));
+
+// swipe to steer on phones
+let touch = null;
+canvas.addEventListener('touchstart', e => { const t = e.touches[0]; touch = [t.clientX, t.clientY]; }, { passive: true });
+canvas.addEventListener('touchend', e => {
+  if (!touch) return;
+  const t = e.changedTouches[0], dx = t.clientX - touch[0], dy = t.clientY - touch[1];
+  touch = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) { if (over) start(); return; }
+  turn(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+});
+
+reset(); draw();
+</script>
+</body>
+</html>
