@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Four in a row - Max's sound index!</title>
+<link rel="icon" href="favicon.png">
+<style>
+  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
+  a { color: #000; }
+  .row { margin: 8px 0; }
+  .small { font-size: 13px; }
+  canvas { display: block; width: 100%; max-width: 420px; height: auto; touch-action: manipulation; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="row small"><a href="index.html">Max's sound index!</a> | <a href="weather.html">Weather playlist</a> | <a href="snake.html">Snake</a> | <a href="pong.html">Pong</a> | <a href="jump.html">Jump</a> | <a href="blocks.html">Blocks</a></div>
+<div class="row"><b>Four in a row</b></div>
+<div class="row">
+  <label>Opponent:
+    <select id="mode">
+      <option value="hard">Computer (hard)</option>
+      <option value="medium">Computer (medium)</option>
+      <option value="easy">Computer (easy)</option>
+      <option value="two">Two players</option>
+    </select>
+  </label>
+  <button id="new">New game</button>
+</div>
+<div class="row">You: <span id="wins">0</span> | Computer: <span id="losses">0</span> | Draws: <span id="draws">0</span></div>
+
+<canvas id="board" width="420" height="420" aria-label="Four in a row board"></canvas>
+
+<p id="status" aria-live="polite">Your turn. You're black. Click a column to drop a disc, or use the arrow keys and Enter.</p>
+<p class="small">Get four of your discs in a line, across, up and down, or diagonally, before your opponent does.</p>
+
+<script>
+const COLS = 7, ROWS = 6, CELL = 60, TOP = 60;
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+
+let board, turn, over, winLine, hoverCol = 3, busy = false, drop = null;
+const tally = { wins: 0, losses: 0, draws: 0 };
+const NAMES = { 1: 'Black', 2: 'White' };
+
+/* ---------- rules ---------- */
+
+const emptyBoard = () => Array.from({ length: COLS }, () => []);   // each column is a stack, bottom first
+const canPlay = (b, c) => b[c].length < ROWS;
+const at = (b, c, r) => (c >= 0 && c < COLS && r >= 0 && r < ROWS) ? (b[c][r] || 0) : -1;
+
+function findWin(b, who) {
+  const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]];
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+    if (at(b, c, r) !== who) continue;
+    for (const [dc, dr] of dirs) {
+      const line = [[c, r]];
+      for (let k = 1; k < 4 && at(b, c + dc * k, r + dr * k) === who; k++) line.push([c + dc * k, r + dr * k]);
+      if (line.length === 4) return line;
+    }
+  }
+  return null;
+}
+const full = b => b.every(col => col.length === ROWS);
+
+/* ---------- computer player (minimax with alpha-beta pruning) ---------- */
+
+const ORDER = [3, 2, 4, 1, 5, 0, 6];   // try the centre first; it's usually best and speeds up the search
+
+// score a line of four cells: more of your discs with room to finish is better, and the same for your opponent counts against you
+function scoreWindow(cells, me, them) {
+  let mine = 0, theirs = 0;
+  for (const x of cells) { if (x === me) mine++; else if (x === them) theirs++; }
+  if (mine && theirs) return 0;   // blocked line, worth nothing to either side
+  return [0, 1, 4, 16][mine] - [0, 1, 4, 16][theirs];
+}
+
+function evaluate(b, me) {
+  const them = 3 - me;
+  let s = 0;
+  for (let r = 0; r < ROWS; r++) s += (at(b, 3, r) === me ? 3 : 0) - (at(b, 3, r) === them ? 3 : 0);
+  const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]];
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) for (const [dc, dr] of dirs) {
+    const cells = [0, 1, 2, 3].map(k => at(b, c + dc * k, r + dr * k));
+    if (cells.includes(-1)) continue;
+    s += scoreWindow(cells, me, them);
+  }
+  return s;
+}
+
+// did the top disc in column c just make four?
+function winsAt(b, c) {
+  const r = b[c].length - 1, who = b[c][r];
+  for (const [dc, dr] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+    let n = 1;
+    for (let k = 1; at(b, c + dc * k, r + dr * k) === who; k++) n++;
+    for (let k = 1; at(b, c - dc * k, r - dr * k) === who; k++) n++;
+    if (n >= 4) return true;
+  }
+  return false;
+}
+
+let deadline = 0, timedOut = false;
+function negamax(b, depth, alpha, beta, who, last) {
+  if (winsAt(b, last)) return -100000 - depth;       // the previous move won; prefer faster wins
+  if (full(b)) return 0;
+  if (depth === 0) return evaluate(b, who);
+  if (Date.now() > deadline) { timedOut = true; return 0; }
+  let best = -Infinity;
+  for (const c of ORDER) {
+    if (!canPlay(b, c)) continue;
+    b[c].push(who);
+    const v = -negamax(b, depth - 1, -beta, -alpha, 3 - who, c);
+    b[c].pop();
+    if (v > best) best = v;
+    if (v > alpha) alpha = v;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+function searchRoot(b, who, depth) {
+  let best = -Infinity, choices = [];
+  for (const c of ORDER) {
+    if (!canPlay(b, c)) continue;
+    b[c].push(who);
+    const v = -negamax(b, depth - 1, -Infinity, Infinity, 3 - who, c);
+    b[c].pop();
+    if (timedOut) return null;
+    if (v > best) { best = v; choices = [c]; }
+    else if (v === best) choices.push(c);
+  }
+  return { best, choices };
+}
+
+function computerMove(b, who, level) {
+  const moves = ORDER.filter(c => canPlay(b, c));
+  if (level === 'easy' && Math.random() < 0.35) return moves[Math.floor(Math.random() * moves.length)];
+  const maxDepth = level === 'hard' ? 12 : level === 'medium' ? 4 : 2;
+  // search deeper and deeper until time runs out, keeping the last finished answer
+  deadline = Date.now() + (level === 'hard' ? 900 : 5000); timedOut = false;
+  let result = null;
+  for (let d = 1; d <= maxDepth; d++) {
+    const r = searchRoot(b, who, d);
+    if (!r) break;
+    result = r;
+    if (Math.abs(r.best) >= 100000) break;            // a forced win or loss has been found
+  }
+  const ch = result.choices;
+  return ch[Math.floor(Math.random() * ch.length)];   // vary between equally good moves
+}
+
+/* ---------- game flow ---------- */
+
+function newGame() {
+  board = emptyBoard(); turn = 1; over = false; winLine = null; busy = false; drop = null;
+  $('status').textContent = $('mode').value === 'two'
+    ? "Black's turn. Click a column to drop a disc."
+    : "Your turn. You're black. Click a column to drop a disc, or use the arrow keys and Enter.";
+  draw();
+}
+
+function play(c) {
+  if (over || busy || !canPlay(board, c)) return;
+  const vsComputer = $('mode').value !== 'two';
+  if (vsComputer && turn !== 1) return;
+  place(c, () => {
+    if (!over && vsComputer) {
+      $('status').textContent = 'The computer is thinking…';
+      busy = true;
+      setTimeout(() => {   // let the page redraw before the search runs
+        const move = computerMove(board, 2, $('mode').value);
+        place(move, () => { busy = false; if (!over) $('status').textContent = 'Your turn.'; });
+      }, 50);
+    }
+  });
+}
+
+// animate a disc falling into column c, then apply the move
+function place(c, done) {
+  const who = turn, row = board[c].length;
+  busy = true;
+  drop = { c, who, y: TOP / 2, target: TOP + (ROWS - 1 - row) * CELL + CELL / 2, v: 0 };
+  const step = () => {
+    drop.v += 2.2; drop.y += drop.v;
+    if (drop.y < drop.target) { draw(); requestAnimationFrame(step); return; }
+    drop = null;
+    board[c].push(who);
+    busy = false;
+    afterMove(who);
+    draw();
+    done && done();
+  };
+  requestAnimationFrame(step);
+}
+
+function afterMove(who) {
+  const vsComputer = $('mode').value !== 'two';
+  const line = findWin(board, who);
+  if (line) {
+    over = true; winLine = line;
+    if (!vsComputer) $('status').textContent = `${NAMES[who]} wins! Click New game to play again.`;
+    else if (who === 1) { tally.wins++; $('status').textContent = 'You win! Click New game to play again.'; }
+    else { tally.losses++; $('status').textContent = 'The computer wins. Click New game to try again.'; }
+  } else if (full(board)) {
+    over = true; tally.draws++;
+    $('status').textContent = "It's a draw. Click New game to play again.";
+  } else {
+    turn = 3 - who;
+    if (!vsComputer) $('status').textContent = `${NAMES[turn]}'s turn.`;
+  }
+  $('wins').textContent = tally.wins; $('losses').textContent = tally.losses; $('draws').textContent = tally.draws;
+}
+
+/* ---------- drawing ---------- */
+
+function disc(x, y, who, r = CELL / 2 - 6) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  if (who === 1) { ctx.fillStyle = '#000'; ctx.fill(); }
+  else { ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.stroke(); }
+}
+
+function draw() {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // preview disc above the chosen column
+  const myTurn = !over && !busy && ($('mode').value === 'two' || turn === 1);
+  if (myTurn && canPlay(board, hoverCol)) disc(hoverCol * CELL + CELL / 2, TOP / 2, turn, CELL / 2 - 10);
+
+  if (drop) disc(drop.c * CELL + CELL / 2, Math.min(drop.y, drop.target), drop.who);
+
+  // the board: a frame with empty holes
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+  ctx.strokeRect(1, TOP + 1, COLS * CELL - 2, ROWS * CELL - 2);
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+    const x = c * CELL + CELL / 2, y = TOP + (ROWS - 1 - r) * CELL + CELL / 2;
+    const who = at(board, c, r);
+    if (who) disc(x, y, who);
+    else { ctx.beginPath(); ctx.arc(x, y, CELL / 2 - 6, 0, Math.PI * 2); ctx.lineWidth = 1; ctx.strokeStyle = '#000'; ctx.stroke(); }
+  }
+
+  // mark the winning four with a line through them
+  if (winLine) {
+    const pt = ([c, r]) => [c * CELL + CELL / 2, TOP + (ROWS - 1 - r) * CELL + CELL / 2];
+    const [x1, y1] = pt(winLine[0]), [x2, y2] = pt(winLine[3]);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 12; ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.lineWidth = 6; ctx.strokeStyle = '#000';
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.lineCap = 'butt';
+  }
+}
+
+/* ---------- controls ---------- */
+
+function colFromEvent(clientX) {
+  const r = canvas.getBoundingClientRect();
+  return Math.max(0, Math.min(COLS - 1, Math.floor((clientX - r.left) / r.width * COLS)));
+}
+canvas.addEventListener('mousemove', e => { const c = colFromEvent(e.clientX); if (c !== hoverCol) { hoverCol = c; draw(); } });
+canvas.addEventListener('click', e => { hoverCol = colFromEvent(e.clientX); play(hoverCol); });
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'BUTTON') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); hoverCol = Math.max(0, hoverCol - 1); draw(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); hoverCol = Math.min(COLS - 1, hoverCol + 1); draw(); }
+  else if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') { e.preventDefault(); play(hoverCol); }
+  else if (e.key >= '1' && e.key <= '7') { hoverCol = +e.key - 1; play(hoverCol); }
+});
+
+$('new').addEventListener('click', newGame);
+$('mode').addEventListener('change', newGame);
+
+newGame();
+</script>
+</body>
+</html>
