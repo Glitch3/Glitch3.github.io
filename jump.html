@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jump - Max's sound index!</title>
+<link rel="icon" href="favicon.png">
+<style>
+  body { font-family: Arial, sans-serif; background: #fff; color: #000; margin: 10px; max-width: 760px; }
+  a { color: #000; }
+  .row { margin: 8px 0; }
+  .small { font-size: 13px; }
+  canvas { display: block; border: 1px solid #000; width: 100%; max-width: 360px; height: auto; touch-action: none; }
+  ul.small { padding-left: 20px; }
+</style>
+</head>
+<body>
+<div class="row small"><a href="index.html">Max's sound index!</a> | <a href="weather.html">Weather playlist</a> | <a href="snake.html">Snake</a> | <a href="pong.html">Pong</a> | <a href="four.html">Four in a row</a> | <a href="blocks.html">Blocks</a></div>
+<div class="row"><b>Jump</b></div>
+<div class="row">Score: <span id="score">0</span> | Best: <span id="best">0</span></div>
+
+<canvas id="board" width="360" height="600" aria-label="Jump game board"></canvas>
+
+<p id="status" aria-live="polite">Bounce from platform to platform and climb as high as you can. Steer with the arrow keys or A and D, and shoot upwards with the up arrow or W. On a phone, hold the left or right side of the board to steer, and tap the top of the board to shoot. Press Space or Start to play.</p>
+<div class="row"><button id="start">Start</button> <button id="pause">Pause</button></div>
+<ul class="small">
+  <li>Solid platforms are safe. Platforms with a white line move. Outlined ones crumble when you land on them. Dashed ones vanish after one bounce.</li>
+  <li>Monsters appear as you climb. Jump on their heads or shoot them for 50 points. Touching them any other way knocks you out.</li>
+  <li>Avoid the holes. They pull you in if you get close.</li>
+  <li>Springs give a big jump. Rockets fly you straight up. Shields protect you from monsters and holes for a few seconds.</li>
+</ul>
+
+<script>
+const W = 360, H = 600;
+const GRAVITY = 0.4, JUMP = -11.5, SPRING = -19, ROCKET = -14, MOVE = 6;
+const PW = 60, PH = 10, SIZE = 24;
+const ROCKET_TIME = 150, SHIELD_TIME = 480;   // frames (60 per second)
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+
+let p, plats, monsters, holes, bullets, camY, highest, heightScore, bonus, score, best = 0;
+let state = 'ready', keys = { left: false, right: false }, touchDir = 0, last = 0, clock = 0, shootCool = 0, deathMsg = '';
+
+/* ---------- world ---------- */
+
+function difficulty() { return Math.min(1, score / 3000); }   // 0 at the start, 1 at 3000 points
+
+function makePlat(y) {
+  const d = difficulty();
+  const plat = { x: Math.random() * (W - PW), y, kind: 'solid', vx: 0, item: null, broken: false, gone: false };
+  const r = Math.random();
+  if (score > 500 && r < 0.12 + 0.12 * d) plat.kind = 'vanish';
+  else if (r < 0.12 + 0.12 * d + 0.35 * d) { plat.kind = 'moving'; plat.vx = (Math.random() < 0.5 ? -1 : 1) * (1 + d * 1.5); }
+  const i = Math.random();
+  if (i < 0.06) plat.item = 'spring';
+  else if (score > 150 && i < 0.075) plat.item = 'rocket';
+  else if (score > 150 && i < 0.09) plat.item = 'shield';
+  return plat;
+}
+
+function makeMonster(y) {
+  const flyer = Math.random() < 0.4;
+  return flyer
+    ? { kind: 'flyer', x: Math.random() * (W - 34), y, baseY: y, w: 34, h: 22, vx: (Math.random() < 0.5 ? -1 : 1) * 1.2, t: Math.random() * 6, dead: false, vy: 0 }
+    : { kind: 'walker', x: Math.random() * (W - 36), y, baseY: y, w: 36, h: 26, vx: (Math.random() < 0.5 ? -1 : 1) * (0.8 + difficulty()), t: 0, dead: false, vy: 0 };
+}
+
+// keep the world filled above the screen; the gap grows with difficulty but always stays jumpable
+function fill() {
+  let top = Math.min(...plats.filter(q => q.kind !== 'crumble').map(q => q.y));
+  while (top > camY - H) {
+    const d = difficulty();
+    const gap = 50 + Math.random() * (35 + d * 60);   // max gap 145px; a jump reaches about 165px
+    top -= gap;
+    plats.push(makePlat(top));
+    if (Math.random() < 0.15 + d * 0.25)              // crumbling platforms as traps
+      plats.push({ x: Math.random() * (W - PW), y: top - 20 - Math.random() * 30, kind: 'crumble', vx: 0, item: null, broken: false, gone: false });
+    const hazardY = top + gap / 2;                     // halfway between this platform and the last
+    if (score > 300 && Math.random() < 0.05 + d * 0.09) monsters.push(makeMonster(hazardY - 13));
+    else if (score > 800 && Math.random() < 0.02 + d * 0.05) holes.push({ x: 30 + Math.random() * (W - 60), y: hazardY, r: 20 });
+  }
+  const bottom = camY + H + 60;
+  plats = plats.filter(q => q.y < bottom);
+  monsters = monsters.filter(m => m.y < bottom);
+  holes = holes.filter(h => h.y < bottom);
+}
+
+function reset() {
+  p = { x: W / 2 - SIZE / 2, y: H - 100, vx: 0, vy: JUMP, rocket: 0, shield: 0, dying: false };
+  camY = 0; highest = p.y; heightScore = 0; bonus = 0; score = 0; clock = 0; shootCool = 0;
+  $('score').textContent = 0;
+  plats = [{ x: W / 2 - PW / 2, y: H - 40, kind: 'solid', vx: 0, item: null, broken: false, gone: false }];
+  monsters = []; holes = []; bullets = [];
+  fill();
+}
+
+/* ---------- update ---------- */
+
+const overlap = (ax, ay, aw, ah, bx, by, bw, bh, m = 0) =>
+  ax + m < bx + bw && ax + aw - m > bx && ay + m < by + bh && ay + ah - m > by;
+
+function knockOut(msg) {
+  if (p.dying) return;
+  p.dying = true; p.vy = Math.max(p.vy, 0); p.rocket = 0; deathMsg = msg;
+}
+
+function shoot() {
+  if (state !== 'playing' || p.dying || shootCool > 0) return;
+  bullets.push({ x: p.x + SIZE / 2 - 2, y: p.y - 8 });
+  shootCool = 12;
+}
+
+function update(f) {
+  clock += f;
+  shootCool -= f;
+
+  // steering, with wrap-around at the sides
+  const dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0) || touchDir;
+  p.vx = p.dying ? 0 : dir * MOVE;
+  p.x += p.vx * f;
+  if (p.x > W) p.x = -SIZE;
+  if (p.x < -SIZE) p.x = W;
+
+  // vertical movement
+  const prevBottom = p.y + SIZE;
+  if (p.rocket > 0) { p.rocket -= f; p.vy = ROCKET; }
+  else p.vy += GRAVITY * f;
+  p.y += p.vy * f;
+  if (p.shield > 0) p.shield -= f;
+  const safe = p.rocket > 0 || p.shield > 0;
+
+  // platforms
+  for (const q of plats) {
+    if (q.kind === 'moving') {
+      q.x += q.vx * f;
+      if (q.x < 0 || q.x > W - PW) { q.vx *= -1; q.x = Math.max(0, Math.min(W - PW, q.x)); }
+    }
+    if (q.broken) { q.y += 6 * f; continue; }
+    if (q.gone || p.dying || p.rocket > 0) continue;
+
+    // items sit in the middle of the platform
+    const ix = q.x + PW / 2 - 9;
+    if (q.item === 'rocket' && overlap(p.x, p.y, SIZE, SIZE, ix, q.y - 22, 18, 22)) { q.item = null; p.rocket = ROCKET_TIME; continue; }
+    if (q.item === 'shield' && overlap(p.x, p.y, SIZE, SIZE, ix, q.y - 20, 18, 18)) { q.item = null; p.shield = SHIELD_TIME; }
+
+    // land only when falling onto the top of a platform
+    if (p.vy > 0 && prevBottom <= q.y && p.y + SIZE >= q.y && p.x + SIZE > q.x && p.x < q.x + PW) {
+      if (q.kind === 'crumble') { q.broken = true; continue; }
+      p.y = q.y - SIZE;
+      const onSpring = q.item === 'spring' && p.x + SIZE > q.x + PW / 2 - 12 && p.x < q.x + PW / 2 + 12;
+      p.vy = onSpring ? SPRING : JUMP;
+      if (q.kind === 'vanish') q.gone = true;
+    }
+  }
+
+  // monsters
+  for (const m of monsters) {
+    if (m.dead) { m.vy += GRAVITY * f; m.y += m.vy * f; continue; }
+    m.t += f * 0.08;
+    m.x += m.vx * f;
+    if (m.x < 0 || m.x > W - m.w) { m.vx *= -1; m.x = Math.max(0, Math.min(W - m.w, m.x)); }
+    if (m.kind === 'flyer') m.y = m.baseY + Math.sin(m.t) * 25;
+    if (p.dying) continue;
+    if (overlap(p.x, p.y, SIZE, SIZE, m.x, m.y, m.w, m.h, 3)) {
+      const stomp = p.vy > 0 && prevBottom <= m.y + 8;
+      if (stomp || safe) {
+        m.dead = true; m.vy = 0; bonus += 50;
+        if (stomp && p.rocket <= 0) p.vy = JUMP;
+      } else knockOut('A monster got you!');
+    }
+  }
+
+  // holes pull you in
+  for (const h of holes) {
+    if (p.dying || p.rocket > 0) continue;
+    const cx = p.x + SIZE / 2, cy = p.y + SIZE / 2;
+    const dist = Math.hypot(h.x - cx, h.y - cy);
+    if (dist < 110 && p.shield <= 0) p.x += Math.sign(h.x - cx) * 1.6 * (1 - dist / 110) * f;
+    if (dist < h.r + 8) {
+      if (p.shield > 0) continue;
+      state = 'over';
+      return finish('You fell into a hole!');
+    }
+  }
+
+  // bullets
+  for (const b of bullets) {
+    b.y -= 12 * f;
+    for (const m of monsters) {
+      if (!m.dead && overlap(b.x, b.y, 4, 8, m.x, m.y, m.w, m.h)) { m.dead = true; m.vy = 0; b.y = -Infinity; bonus += 50; }
+    }
+  }
+  bullets = bullets.filter(b => b.y > camY - 20);
+
+  // camera follows upwards, never down
+  if (!p.dying && p.y < camY + H * 0.4) camY = p.y - H * 0.4;
+  if (p.y < highest) { highest = p.y; heightScore = Math.floor((H - 100 - highest) / 10); }
+  score = heightScore + bonus;
+  $('score').textContent = score;
+  fill();
+
+  if (p.y > camY + H) finish(p.dying ? deathMsg : 'You fell!');
+}
+
+function finish(msg) {
+  state = 'over';
+  if (score > best) { best = score; $('best').textContent = best; }
+  $('status').textContent = `${msg} You scored ${score}. Press Space or Start to play again.`;
+}
+
+/* ---------- draw ---------- */
+
+function drawPlat(q) {
+  ctx.fillStyle = '#000'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+  if (q.kind === 'crumble') {
+    if (q.broken) {
+      ctx.strokeRect(q.x + 1, q.y + 1, PW / 2 - 4, PH - 2);
+      ctx.strokeRect(q.x + PW / 2 + 3, q.y + 4, PW / 2 - 4, PH - 2);
+    } else ctx.strokeRect(q.x + 1, q.y + 1, PW - 2, PH - 2);
+    return;
+  }
+  if (q.kind === 'vanish') {
+    if (q.gone) return;
+    for (let x = 0; x < PW; x += 12) ctx.fillRect(q.x + x, q.y, 8, PH);
+  } else {
+    ctx.fillRect(q.x, q.y, PW, PH);
+    if (q.kind === 'moving') { ctx.fillStyle = '#fff'; ctx.fillRect(q.x + 4, q.y + 4, PW - 8, 2); ctx.fillStyle = '#000'; }
+  }
+  const cx = q.x + PW / 2;
+  if (q.item === 'spring') ctx.fillRect(cx - 8, q.y - 8, 16, 8);
+  if (q.item === 'rocket') drawRocket(cx - 6, q.y - 22);
+  if (q.item === 'shield') { ctx.beginPath(); ctx.arc(cx, q.y - 10, 8, 0, Math.PI * 2); ctx.stroke(); ctx.fillRect(cx - 2, q.y - 12, 4, 4); }
+}
+
+function drawRocket(x, y) {   // small upright rocket, 12 wide, 22 tall
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.moveTo(x + 6, y); ctx.lineTo(x + 12, y + 7); ctx.lineTo(x, y + 7); ctx.fill();
+  ctx.fillRect(x + 1, y + 7, 10, 11);
+  ctx.fillRect(x - 2, y + 14, 3, 8); ctx.fillRect(x + 11, y + 14, 3, 8);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x + 4, y + 9, 4, 4); ctx.fillStyle = '#000';
+}
+
+function drawMonster(m) {
+  ctx.save();
+  if (m.dead) { ctx.translate(m.x + m.w / 2, m.y + m.h / 2); ctx.rotate(Math.PI); ctx.translate(-(m.x + m.w / 2), -(m.y + m.h / 2)); }
+  ctx.fillStyle = '#000';
+  if (m.kind === 'walker') {
+    // a boxy grump with legs, angry eyes and a toothy grin
+    ctx.fillRect(m.x, m.y, m.w, m.h - 6);
+    const step = Math.sin(clock * 0.3) > 0 ? 2 : 0;
+    ctx.fillRect(m.x + 5, m.y + m.h - 6, 5, 6 - step);
+    ctx.fillRect(m.x + m.w - 10, m.y + m.h - 6, 5, 4 + step);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(m.x + 7, m.y + 6, 7, 5); ctx.fillRect(m.x + m.w - 14, m.y + 6, 7, 5);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(m.x + 9, m.y + 6, 4, 2); ctx.fillRect(m.x + m.w - 13, m.y + 6, 4, 2);   // frown over the eyes
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 5; i++) {
+      ctx.beginPath();
+      const tx = m.x + 6 + i * 5;
+      ctx.moveTo(tx, m.y + 14); ctx.lineTo(tx + 5, m.y + 14); ctx.lineTo(tx + 2.5, m.y + 18); ctx.fill();
+    }
+  } else {
+    // a round one-eyed flapper
+    const cx = m.x + m.w / 2, cy = m.y + m.h / 2, flap = Math.sin(clock * 0.4) * 6;
+    ctx.beginPath(); ctx.moveTo(cx - 8, cy); ctx.lineTo(m.x - 4, cy - 8 + flap); ctx.lineTo(cx - 6, cy + 6); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(cx + 8, cy); ctx.lineTo(m.x + m.w + 4, cy - 8 + flap); ctx.lineTo(cx + 6, cy + 6); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy - 1, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx + Math.sign(m.vx) * 2, cy - 1, 2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHole(h) {
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+  const spin = clock * 0.05;
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath(); ctx.arc(h.x, h.y, 5 + i * 5, spin + i, spin + i + Math.PI * 1.2); ctx.stroke();
+  }
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r + 8, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawPlayer() {
+  ctx.fillStyle = '#000';
+  if (p.rocket > 0) {   // flames under the rocket
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    const fl = 8 + Math.random() * 8;
+    ctx.beginPath(); ctx.moveTo(p.x + 4, p.y + SIZE + 6); ctx.lineTo(p.x + 8, p.y + SIZE + 6 + fl); ctx.lineTo(p.x + 12, p.y + SIZE + 6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x + 12, p.y + SIZE + 6); ctx.lineTo(p.x + 16, p.y + SIZE + 6 + fl); ctx.lineTo(p.x + 20, p.y + SIZE + 6); ctx.stroke();
+    ctx.fillRect(p.x + 2, p.y + SIZE, SIZE - 4, 6);
+  }
+  ctx.fillRect(p.x, p.y, SIZE, SIZE);
+  ctx.fillStyle = '#fff';
+  if (p.dying) {   // crossed-out eyes
+    ctx.fillRect(p.x + 5, p.y + 8, 6, 2); ctx.fillRect(p.x + 13, p.y + 8, 6, 2);
+  } else {
+    const look = Math.sign(p.vx) * 3;
+    ctx.fillRect(p.x + 6 + look, p.y + 7, 4, 4);
+    ctx.fillRect(p.x + 14 + look, p.y + 7, 4, 4);
+  }
+  if (p.shield > 0 && (p.shield > 90 || Math.floor(clock / 6) % 2)) {   // blinks when about to run out
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.arc(p.x + SIZE / 2, p.y + SIZE / 2, SIZE, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(0, -camY);
+  plats.forEach(drawPlat);
+  holes.forEach(drawHole);
+  monsters.forEach(drawMonster);
+  ctx.fillStyle = '#000';
+  bullets.forEach(b => ctx.fillRect(b.x, b.y, 4, 8));
+  drawPlayer();
+  ctx.restore();
+}
+
+function loop(now) {
+  const f = Math.min(3, (now - last) / (1000 / 60));
+  last = now;
+  if (state === 'playing') update(f);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- controls ---------- */
+
+function start() {
+  reset(); state = 'playing';
+  $('pause').textContent = 'Pause';
+  $('status').textContent = 'Playing. Press Space to pause.';
+}
+function togglePause() {
+  if (state === 'playing') { state = 'paused'; $('pause').textContent = 'Resume'; $('status').textContent = 'Paused. Press Space to carry on.'; }
+  else if (state === 'paused') { state = 'playing'; $('pause').textContent = 'Pause'; $('status').textContent = 'Playing. Press Space to pause.'; }
+}
+
+const KEYS = { ArrowLeft: 'left', a: 'left', A: 'left', ArrowRight: 'right', d: 'right', D: 'right' };
+document.addEventListener('keydown', e => {
+  if (KEYS[e.key]) { e.preventDefault(); keys[KEYS[e.key]] = true; }
+  else if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') { e.preventDefault(); shoot(); }
+  else if (e.key === ' ') { e.preventDefault(); (state === 'ready' || state === 'over') ? start() : togglePause(); }
+});
+document.addEventListener('keyup', e => { if (KEYS[e.key]) keys[KEYS[e.key]] = false; });
+
+// phones: hold the left or right half to steer, tap the top quarter to shoot
+function touchSide(e) {
+  const r = canvas.getBoundingClientRect();
+  const steer = [...e.touches].filter(t => t.clientY - r.top > r.height * 0.25);
+  touchDir = steer.length ? (steer[0].clientX - r.left < r.width / 2 ? -1 : 1) : 0;
+}
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (state === 'ready' || state === 'over') { start(); return; }
+  const r = canvas.getBoundingClientRect();
+  if ([...e.changedTouches].some(t => t.clientY - r.top <= r.height * 0.25)) shoot();
+  touchSide(e);
+}, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); touchSide(e); }, { passive: false });
+canvas.addEventListener('touchend', touchSide);
+canvas.addEventListener('click', () => { if (state === 'ready' || state === 'over') start(); });
+
+$('start').addEventListener('click', start);
+$('pause').addEventListener('click', togglePause);
+
+reset();
+requestAnimationFrame(t => { last = t; loop(t); });
+</script>
+</body>
+</html>
